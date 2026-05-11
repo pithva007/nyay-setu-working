@@ -64,7 +64,7 @@ docker-compose up --build
 ```
 
 The system will be available at:
-- **Frontend:** http://localhost:80
+- **Frontend:** http://localhost
 - **Backend API:** http://localhost:8080
 - **NLP Service:** http://localhost:8001
 - **Database:** localhost:5432

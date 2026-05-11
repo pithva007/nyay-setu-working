@@ -9,10 +9,10 @@ COPY src ./src
 RUN mvn package -DskipTests
 
 # Stage 2: Runtime 
-FROM eclipse-temurin:17-jre-jammy
+FROM eclipse-temurin:17-jre-alpine
 WORKDIR /app
 
-RUN groupadd -r spring && useradd -r -g spring spring
+RUN addgroup -S spring && adduser -S spring -G spring
 USER spring:spring
 
 COPY --from=build /app/target/*.jar app.jar
