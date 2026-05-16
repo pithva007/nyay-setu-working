@@ -6,6 +6,7 @@ import com.nyaysetu.backend.entity.Role;
 import com.nyaysetu.backend.entity.User;
 import com.nyaysetu.backend.repository.PasswordResetTokenRepository;
 import com.nyaysetu.backend.service.*;
+import io.swagger.v3.oas.annotations.security.SecurityRequirements;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -38,6 +39,7 @@ public class AuthController {
     private final PasswordResetTokenRepository tokenRepository;
     private final PasswordEncoder passwordEncoder;
 
+    @SecurityRequirements
     @PostMapping("/register")
     public ResponseEntity<?> register(@Valid @RequestBody RegisterRequest req) {
         try {
@@ -77,6 +79,7 @@ public class AuthController {
         return ResponseEntity.ok("pong");
     }
 
+    @SecurityRequirements
     @PostMapping("/login")
     public ResponseEntity<?> login(@Valid @RequestBody LoginRequest req) {
         System.out.println("DEBUG: LOGIN ENDPOINT REACHED for email: " + req.getEmail());
@@ -103,6 +106,7 @@ public class AuthController {
         }
     }
 
+    @SecurityRequirements
     @PostMapping("/refresh")
     public ResponseEntity<?> refreshToken(@Valid @RequestBody RefreshTokenRequest req) {
         try {
@@ -135,6 +139,7 @@ public class AuthController {
 
     // ==================== PASSWORD RESET ENDPOINTS ====================
 
+    @SecurityRequirements
     @PostMapping("/forgot-password")
     public ResponseEntity<?> forgotPassword(@RequestBody ForgotPasswordRequest req) {
         try {
