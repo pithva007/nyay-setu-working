@@ -8,7 +8,6 @@ Endpoints:
   POST /api/legal/analyze           — Sync version (testing only)
   GET  /health                      — Health check
 """
-
 import asyncio
 import json
 import logging
@@ -25,6 +24,7 @@ from decomposer import decompose_query
 from router import route_questions
 from research import run_parallel_research
 from synthesizer import synthesize_answers
+from validators.citation_validator import validate_citations_from_text
 from avatar_speech import get_interim_messages, convert_to_hinglish, detect_domain
 from services.kanoon_search import build_kanoon_context
 from routers.forensics import router as forensics_router
@@ -89,10 +89,15 @@ async def legal_reasoning_pipeline(query: str, language: str):
     Fix: Removed inner async generator — research now runs as a background
     asyncio.Task while interim messages are yielded from the outer generator.
     """
+    kanoon_task = None
+    research_task = None
+
     try:
         # ── Layer 1: Decompose ───────────────────────────────────
         logger.info(f"[Layer 1] Decomposing: {query[:60]}...")
         yield sse_event("avatar_update", {"message": "Aapka sawaal samajh raha hoon, thoda wait karein..."})
+
+        kanoon_task = asyncio.create_task(build_kanoon_context(query, max_results=3))
 
         sub_questions = await decompose_query(query)
         logger.info(f"[Layer 1] Got {len(sub_questions)} sub-questions")
@@ -102,6 +107,12 @@ async def legal_reasoning_pipeline(query: str, language: str):
         routed = route_questions(sub_questions)
         logger.info(f"[Layer 2] Routing: {[(r['question'][:30], r['model']) for r in routed]}")
 
+        try:
+            kanoon_context, _ = await kanoon_task
+        except Exception as e:
+            logger.error("[Layer 2] Indian Kanoon fetch failed: %s", e)
+            kanoon_context = ""
+
         # ── Layer 5a: Interim Avatar Messages (to stream while research runs) ──
         interim_messages = get_interim_messages(query, count=3)
 
@@ -109,7 +120,7 @@ async def legal_reasoning_pipeline(query: str, language: str):
         yield sse_event("research_start", {"total": len(routed)})
 
         # Launch research as a background Task so we can yield interims concurrently
-        research_task = asyncio.create_task(run_parallel_research(routed))
+        research_task = asyncio.create_task(run_parallel_research(routed, kanoon_context=kanoon_context))
 
         # Yield interim avatar messages every 2.5s while research task completes
         for msg in interim_messages:
@@ -137,13 +148,22 @@ async def legal_reasoning_pipeline(query: str, language: str):
         logger.info("[Layer 4] Synthesizing...")
         synthesized_md = await synthesize_answers(query, results)
 
+        try:
+            validation_results = validate_citations_from_text(synthesized_md)
+            if validation_results:
+                logger.info("[Layer 4] Citation validation results: %s", validation_results)
+        except Exception as e:
+            logger.warning("[Layer 4] Citation validation failed (non-blocking): %s", e)
+            validation_results = []
+
         # ── Layer 5b: Hinglish Conversion ────────────────────────
         logger.info("[Layer 5] Converting to Hinglish...")
         hinglish_dialogue = await convert_to_hinglish(synthesized_md)
 
         yield sse_event("final_answer", {
             "markdown": synthesized_md,
-            "hinglish": hinglish_dialogue
+            "hinglish": hinglish_dialogue,
+            "citation_validation": validation_results
         })
 
         yield sse_event("done", {"message": "Research complete"})
@@ -176,7 +196,9 @@ async def analyze_stream(body: LegalQuery, request: Request):
     logger.info(f"[Stream] New query: {body.query[:80]}")
 
     async def event_generator():
-        async for event in legal_reasoning_pipeline(body.query, body.language):
+        pipeline = legal_reasoning_pipeline(body.query, body.language)
+
+        async for event in pipeline:
             if await request.is_disconnected():
                 logger.info("[Stream] Client disconnected")
                 break
@@ -200,8 +222,22 @@ async def analyze_sync(body: LegalQuery):
 
     sub_questions = await decompose_query(body.query)
     routed = route_questions(sub_questions)
-    results = await run_parallel_research(routed)
+    try:
+        kanoon_context, _ = await build_kanoon_context(body.query, max_results=3)
+    except Exception as e:
+        logger.error("[Sync] Indian Kanoon fetch failed: %s", e)
+        kanoon_context = ""
+    results = await run_parallel_research(routed, kanoon_context=kanoon_context)
     synthesized = await synthesize_answers(body.query, results)
+
+    try:
+        validation_results = validate_citations_from_text(synthesized)
+        if validation_results:
+            logger.info("[Sync] Citation validation results: %s", validation_results)
+    except Exception as e:
+        logger.warning("[Sync] Citation validation failed (non-blocking): %s", e)
+        validation_results = []
+
     hinglish = await convert_to_hinglish(synthesized)
 
     return JSONResponse({
@@ -210,7 +246,8 @@ async def analyze_sync(body: LegalQuery):
         "research": results,
         "final_answer": {
             "markdown": synthesized,
-            "hinglish": hinglish
+            "hinglish": hinglish,
+            "citation_validation": validation_results
         }
     })
 
@@ -347,9 +384,12 @@ async def deep_research_pipeline(query: str, language: str):
         )
 
         # Call the AI model and stream reasoning
+        ai_answer = None
+
         if model_choice == "gemini" and gemini_client:
             try:
                 loop = asyncio.get_event_loop()
+
                 response = await loop.run_in_executor(
                     None,
                     lambda: gemini_client.models.generate_content(
@@ -357,13 +397,17 @@ async def deep_research_pipeline(query: str, language: str):
                         contents=grounded_prompt
                     )
                 )
+
                 ai_answer = response.text.strip()
+
             except Exception as e:
                 logger.error(f"Gemini failed, falling back to Groq: {e}")
                 model_choice = "groq"
-                ai_answer = None
-        
-        if model_choice == "groq" or (model_choice == "gemini" and not gemini_client):
+
+        if model_choice == "groq" or (
+            model_choice == "gemini" and not gemini_client
+        ):
+
             response = await groq_client.chat.completions.create(
                 model=GROQ_MODEL_FAST,
                 messages=[
@@ -373,6 +417,7 @@ async def deep_research_pipeline(query: str, language: str):
                 temperature=0.2,
                 max_tokens=2048
             )
+
             ai_answer = response.choices[0].message.content.strip()
 
         # Stream reasoning text in chunks for live display
@@ -392,12 +437,17 @@ async def deep_research_pipeline(query: str, language: str):
 
         # ── Stage 5: VERDICT ──────────────────────────────────────
         logger.info("[Deep Research] Stage 5: Verdict...")
-        
+
         yield sse_event("stage", {
             "stage": "verdict",
             "status": "active",
             "message": "Preparing final legal conclusion..."
         })
+
+        # Validate citations in AI response
+        citation_validation = validate_citations_from_text(ai_answer) if ai_answer else []
+        if citation_validation:
+            logger.info("[Deep Research] Citation validation: %s", citation_validation)
 
         # Convert to Hinglish for avatar speech
         hinglish_verdict = await convert_to_hinglish(ai_answer or "Analysis could not be completed.")
@@ -418,6 +468,7 @@ async def deep_research_pipeline(query: str, language: str):
             "answer": ai_answer or "Unable to generate analysis.",
             "hinglish": hinglish_verdict,
             "citations": citations,
+            "citation_validation": citation_validation,
             "model_used": model_choice,
             "domain": domain_label
         })
@@ -452,7 +503,9 @@ async def deep_research(body: LegalQuery, request: Request):
     logger.info(f"[Deep Research] New query: {body.query[:80]}")
 
     async def event_generator():
-        async for event in deep_research_pipeline(body.query, body.language):
+        pipeline = deep_research_pipeline(body.query, body.language)
+
+        async for event in pipeline:
             if await request.is_disconnected():
                 logger.info("[Deep Research] Client disconnected")
                 break
