@@ -591,3 +591,18 @@ backend/nyaysetu-backend
 
 Linux deployment environments are case-sensitive.
 Ensure import paths exactly match filenames.
+
+
+# Court Media Asynchronous Processing Pipeline
+
+This microservice decouples resource-intensive video processing from the main application tier using an asynchronous worker pool, ensuring court rooms stay lag-free.
+
+##  Features Implemented
+- **Asynchronous Queueing:** Uses RabbitMQ decoupling to ingest files safely.
+- **DLQ Fault Tolerance:** Configured a Dead Letter Queue (`court-media-dlq`) to catch broken streams without corrupting session data.
+- **Legal Chain-of-Custody Overlays:** Uses FFmpeg's `drawtext` video matrix filters to burn unalterable, high-contrast Case IDs and timestamps directly onto video frames.
+
+##  Local Verification Run
+1. Install dependencies:
+   ```bash
+   npm install
